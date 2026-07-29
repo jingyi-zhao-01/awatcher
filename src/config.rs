@@ -1,3 +1,6 @@
+use std::env;
+use std::env::VarError;
+use std::net::IpAddr;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -20,17 +23,6 @@ struct AwAuthConfig {
 struct AwConfig {
     #[serde(default)]
     auth: AwAuthConfig,
-}
-
-fn read_aw_server_api_key() -> Option<String> {
-    let config_path = dirs::config_dir()?
-        .join("activitywatch")
-        .join("aw-server-rust")
-        .join("config.toml");
-
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    let config: AwConfig = toml::from_str(&content).ok()?;
-    config.auth.api_key
 }
 
 pub struct RunnerConfig {
@@ -116,30 +108,7 @@ pub fn from_cli() -> anyhow::Result<RunnerConfig> {
     };
     setup_logger(verbosity)?;
 
-    let is_local = ["localhost", "127.0.0.1", "::1"].contains(&config.server.host.as_str());
-
-    let api_key = {
-        let file_api_key = config
-            .server
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|k| !k.is_empty());
-        if let Some(key) = file_api_key {
-            info!("Loaded API key from awatcher config");
-            Some(key.to_string())
-        } else if is_local {
-            let key = read_aw_server_api_key();
-            if key.is_some() {
-                info!("Loaded API key from aw-server-rust config");
-            } else {
-                debug!("No API key is found in the local aw-server-rust configuration");
-            }
-            key
-        } else {
-            None
-        }
-    };
+    let api_key = resolve_api_key(&config);
 
     Ok(RunnerConfig {
         watchers_config: Config {
@@ -203,4 +172,62 @@ where
         let value = &mut matches.get_one::<T>(id).unwrap().clone();
         std::mem::swap(config_value, value);
     }
+}
+
+fn resolve_api_key(config: &FileConfig) -> Option<String> {
+    fn normalize(key: &str) -> Option<String> {
+        let key = key.trim();
+        (!key.is_empty()).then(|| key.to_owned())
+    }
+
+    let env_api_key = match env::var("AW_API_KEY") {
+        Ok(key) => normalize(&key),
+        Err(VarError::NotPresent) => None,
+        Err(VarError::NotUnicode(_)) => {
+            warn!("AW_API_KEY is not valid Unicode, ignoring");
+            None
+        }
+    };
+    if env_api_key.is_some() {
+        info!("Loaded API key from environment");
+        return env_api_key;
+    }
+
+    let file_api_key = config.server.api_key.as_deref().and_then(normalize);
+    if file_api_key.is_some() {
+        info!("Loaded API key from awatcher config");
+        return file_api_key;
+    }
+
+    let host = config.server.host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host); // e.g. [::1]
+    let is_local = if let Ok(ip) = host.parse::<IpAddr>() {
+        ip.is_loopback()
+    } else {
+        host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost")
+    };
+
+    if !is_local {
+        debug!("Server is not local, skipping aw-server-rust config");
+        return None;
+    }
+
+    let config_path = dirs::config_dir()?
+        .join("activitywatch")
+        .join("aw-server-rust")
+        .join("config.toml");
+
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let aw_config: AwConfig = toml::from_str(&content).ok()?;
+    let server_api_key = aw_config.auth.api_key.and_then(|k| normalize(&k));
+    if server_api_key.is_some() {
+        info!("Loaded API key from aw-server-rust config");
+        return server_api_key;
+    }
+
+    debug!("No API key found in the local aw-server-rust configuration");
+    None
 }

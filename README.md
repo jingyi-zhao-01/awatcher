@@ -72,6 +72,7 @@ The config file is in the default directory (`~/.config/awatcher`).
 [server]
 port = 5600
 host = "127.0.0.1"
+api-key = "ABC" # if the server requires an API key to connect
 
 [awatcher]
 idle-timeout-seconds=180
@@ -89,8 +90,8 @@ replace-title = "Unknown"
 
 - `server.port` and `server.host` address the ActivityWatch server instance.
 - `awatcher.idle-timeout-seconds` is the time of inactivity when it is considered "idle".
-- `awatcher.poll-time-idle-seconds` and `awatcher.poll-time-window-seconds` are 
-  intervals between collecting and sending statistics.
+- `awatcher.poll-time-idle-seconds` and `awatcher.poll-time-window-seconds` are intervals between collecting and sending statistics.
+- `api-key` can be overridden by environment variable `AW_API_KEY`.
 
 All options of `server` and `awatcher` config file's sections can be overridden with command-line arguments, as well as the config path. See the builtin help in the command for details.
 
