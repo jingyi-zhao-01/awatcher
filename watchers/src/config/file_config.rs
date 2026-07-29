@@ -14,7 +14,7 @@ pub fn default_config() -> String {
 [server]
 # port = {}
 # host = "{}"
-# api-key = "{}"
+# api-key = ""
 
 [awatcher]
 # idle-timeout-seconds={}
@@ -45,7 +45,6 @@ pub fn default_config() -> String {
 "#,
         defaults::port(),
         defaults::host(),
-        "",
         defaults::idle_timeout_seconds(),
         defaults::poll_time_idle_seconds(),
         defaults::poll_time_window_seconds(),

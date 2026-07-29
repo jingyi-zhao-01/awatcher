@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clap::parser::ValueSource;
 use clap::{arg, value_parser, Arg, ArgAction, ArgMatches, Command};
 use fern::colors::{Color, ColoredLevelConfig};
-use log::{info, warn, LevelFilter};
+use log::LevelFilter;
 use serde::Deserialize;
 use watchers::config::defaults;
 use watchers::config::Config;
@@ -22,8 +22,6 @@ struct AwConfig {
     auth: AwAuthConfig,
 }
 
-/// Reads only the `[auth] api_key` field from the aw-server-rust config.toml.
-/// Returns None if the file doesn't exist, cannot be read, or has no key set.
 fn read_aw_server_api_key() -> Option<String> {
     let config_path = dirs::config_dir()?
         .join("activitywatch")
@@ -120,31 +118,28 @@ pub fn from_cli() -> anyhow::Result<RunnerConfig> {
 
     let is_local = ["localhost", "127.0.0.1", "::1"].contains(&config.server.host.as_str());
 
-    let api_key = config
-        .server
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-        .map(|k| {
+    let api_key = {
+        let file_api_key = config
+            .server
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty());
+        if let Some(key) = file_api_key {
             info!("Loaded API key from awatcher config");
-            k.to_string()
-        })
-        .or_else(|| {
-            if is_local {
-                let key = read_aw_server_api_key();
-                match &key {
-                    Some(_) => info!("Loaded API key from aw-server-rust config"),
-                    None => warn!(
-                        "No API key found in awatcher or aw-server-rust config, proceeding unauthenticated"
-                    ),
-                }
-                key
+            Some(key.to_string())
+        } else if is_local {
+            let key = read_aw_server_api_key();
+            if key.is_some() {
+                info!("Loaded API key from aw-server-rust config");
             } else {
-                warn!("No API key found in awatcher config and host is not local, proceeding unauthenticated");
-                None
+                debug!("No API key is found in the local aw-server-rust configuration");
             }
-        });
+            key
+        } else {
+            None
+        }
+    };
 
     Ok(RunnerConfig {
         watchers_config: Config {
