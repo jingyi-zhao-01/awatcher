@@ -169,6 +169,6 @@ The executable can be bundled with a tray icon, ActivityWatch server and, option
 to build the "dist" folder, 
 1. Build the executable with `AW_WEBUI_DIR=/absolute/path/to/dist` and `--features=bundle`.
 
-This should be compiled on nightly. The complete bundled version is also built and released.
+The complete bundled version is also built and released.
 
 The tray can be disabled with `--no-tray` option in the bundled version.

@@ -1,6 +1,7 @@
 use std::env;
 use std::env::VarError;
-use std::net::IpAddr;
+use std::io;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -174,6 +175,34 @@ where
     }
 }
 
+fn is_local(host: &str) -> bool {
+    let host = host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host); // e.g. [::1]
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let ip = ip.to_canonical();
+        return ip.is_loopback() || ip.is_unspecified();
+    }
+
+    match (host, 0u16).to_socket_addrs() {
+        Ok(addrs) => {
+            // None is empty array which isn't treated as local
+            addrs
+                .fold(None, |is_local: Option<bool>, addr| {
+                    let ip = addr.ip().to_canonical();
+                    Some(is_local.unwrap_or(true) && ip.is_loopback())
+                })
+                .unwrap_or(false)
+        }
+        Err(e) => {
+            debug!("Could not resolve {host}: {e}; treating as remote");
+            false
+        }
+    }
+}
+
 fn resolve_api_key(config: &FileConfig) -> Option<String> {
     fn normalize(key: &str) -> Option<String> {
         let key = key.trim();
@@ -199,30 +228,34 @@ fn resolve_api_key(config: &FileConfig) -> Option<String> {
         return file_api_key;
     }
 
-    let host = config.server.host.trim();
-    let host = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host); // e.g. [::1]
-    let is_local = if let Ok(ip) = host.parse::<IpAddr>() {
-        ip.is_loopback()
-    } else {
-        host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost")
-    };
-
-    if !is_local {
+    if !is_local(&config.server.host) {
         debug!("Server is not local, skipping aw-server-rust config");
         return None;
     }
 
-    let config_path = dirs::config_dir()?
+    let config_path = dirs::config_dir()
+        .or_else(|| {
+            warn!("Config directory not found");
+            None
+        })?
         .join("activitywatch")
         .join("aw-server-rust")
         .join("config.toml");
 
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    let aw_config: AwConfig = toml::from_str(&content).ok()?;
-    let server_api_key = aw_config.auth.api_key.and_then(|k| normalize(&k));
+    let content = std::fs::read_to_string(&config_path)
+        .inspect_err(|e| {
+            if e.kind() != io::ErrorKind::NotFound {
+                warn!("Failed to read {}: {e}", config_path.display());
+            }
+        })
+        .ok()?;
+    let aw_config: AwConfig = toml::from_str(&content)
+        .inspect_err(|_| {
+            warn!("Failed to parse TOML at {}", config_path.display());
+        })
+        .ok()?;
+
+    let server_api_key = aw_config.auth.api_key.as_deref().and_then(normalize);
     if server_api_key.is_some() {
         info!("Loaded API key from aw-server-rust config");
         return server_api_key;
