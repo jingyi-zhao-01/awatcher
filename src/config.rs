@@ -1,5 +1,4 @@
 use std::env;
-use std::env::VarError;
 use std::io;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::Path;
@@ -75,6 +74,10 @@ pub fn from_cli() -> anyhow::Result<RunnerConfig> {
             arg!(--host <HOST> "Custom server host")
                 .value_parser(value_parser!(String))
                 .default_value(defaults::host()),
+            arg!(--"api-key" <APIKEY> "API key for the server")
+                .value_parser(value_parser!(String))
+                .env("AW_API_KEY")
+                .default_value(None),
             arg!(--"idle-timeout" <SECONDS> "Time of inactivity to consider the user idle")
                 .value_parser(value_parser!(u32))
                 .default_value(defaults::idle_timeout_seconds().to_string()),
@@ -109,7 +112,7 @@ pub fn from_cli() -> anyhow::Result<RunnerConfig> {
     };
     setup_logger(verbosity)?;
 
-    let api_key = resolve_api_key(&config);
+    let api_key = resolve_api_key(matches.get_one("api-key").cloned(), &config);
 
     Ok(RunnerConfig {
         watchers_config: Config {
@@ -203,23 +206,15 @@ fn is_local(host: &str) -> bool {
     }
 }
 
-fn resolve_api_key(config: &FileConfig) -> Option<String> {
+fn resolve_api_key(clap_api_key: Option<String>, config: &FileConfig) -> Option<String> {
     fn normalize(key: &str) -> Option<String> {
         let key = key.trim();
         (!key.is_empty()).then(|| key.to_owned())
     }
 
-    let env_api_key = match env::var("AW_API_KEY") {
-        Ok(key) => normalize(&key),
-        Err(VarError::NotPresent) => None,
-        Err(VarError::NotUnicode(_)) => {
-            warn!("AW_API_KEY is not valid Unicode, ignoring");
-            None
-        }
-    };
-    if env_api_key.is_some() {
-        info!("Loaded API key from environment");
-        return env_api_key;
+    if clap_api_key.is_some() {
+        info!("Loaded API key from arguments or environment");
+        return clap_api_key;
     }
 
     let file_api_key = config.server.api_key.as_deref().and_then(normalize);
@@ -263,4 +258,173 @@ fn resolve_api_key(config: &FileConfig) -> Option<String> {
 
     debug!("No API key found in the local aw-server-rust configuration");
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+    use std::path::Path;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+        _env_lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &std::ffi::OsStr) -> Self {
+            let env_lock = ENV_LOCK.lock().unwrap();
+            let previous = std::env::var_os(key);
+            // Safe because tests serialize environment mutation with ENV_LOCK.
+            std::env::set_var(key, value);
+            Self {
+                key,
+                previous,
+                _env_lock: env_lock,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // Safe because tests serialize environment mutation with ENV_LOCK.
+            match &self.previous {
+                Some(val) => std::env::set_var(self.key, val),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn write_aw_server_config(config_root: &Path, contents: &str) {
+        let dir = config_root.join("activitywatch").join("aw-server-rust");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), contents).unwrap();
+    }
+
+    fn with_xdg_config(server_config: Option<&str>) -> (tempfile::TempDir, EnvGuard) {
+        let temp_dir = tempdir().unwrap();
+        let guard = EnvGuard::set("XDG_CONFIG_HOME", temp_dir.path().as_os_str());
+        if let Some(contents) = server_config {
+            write_aw_server_config(temp_dir.path(), contents);
+        }
+        (temp_dir, guard)
+    }
+
+    fn local_config() -> FileConfig {
+        let mut config = FileConfig::default();
+        config.server.host = "127.0.0.1".to_string();
+        config.server.api_key = None;
+        config
+    }
+
+    #[rstest]
+    #[case("127.0.0.1", true)]
+    #[case("127.0.0.50", true)]
+    #[case("0.0.0.0", true)]
+    #[case("::1", true)]
+    #[case("::", true)]
+    #[case("[::1]", true)]
+    #[case("[::]", true)]
+    #[case("::ffff:127.0.0.1", true)]
+    #[case("::ffff:0.0.0.0", true)]
+    #[case("[::ffff:127.0.0.1]", true)]
+    #[case("localhost", true)]
+    #[case("foo.localhost", true)]
+    #[case("  127.0.0.1  ", true)]
+    #[case("  localhost  ", true)]
+    #[case("localhost.foo", false)]
+    #[case("192.168.1.1", false)]
+    #[case("10.0.0.1", false)]
+    #[case("8.8.8.8", false)]
+    #[case("example.com", false)]
+    #[case("this-host-definitely-does-not-exist.invalid", false)]
+    #[case("", false)]
+    #[case("   ", false)]
+    #[case("not an ip", false)]
+    fn matches_is_local(#[case] host: &str, #[case] expected: bool) {
+        assert_eq!(is_local(host), expected, "host: {host}");
+    }
+
+    #[rstest]
+    fn resolve_api_key_cli_takes_precedence() {
+        // CLI wins over file config and server config simultaneously
+        let (_t, _g) = with_xdg_config(Some("[auth]\napi_key = \"server-key\"\n"));
+        let mut config = local_config();
+        config.server.api_key = Some("file-key".to_string());
+        let result = resolve_api_key(Some("cli-key".to_string()), &config);
+        assert_eq!(result, Some("cli-key".to_string()));
+    }
+
+    #[rstest]
+    fn resolve_api_key_file_overrides_server_config() {
+        let (_t, _g) = with_xdg_config(Some("[auth]\napi_key = \"server-key\"\n"));
+        let mut config = local_config();
+        config.server.api_key = Some("file-key".to_string());
+        let result = resolve_api_key(None, &config);
+        assert_eq!(result, Some("file-key".to_string()));
+    }
+
+    #[rstest]
+    #[case("file-key", Some("file-key".to_string()))]
+    #[case("  file-key  ", Some("file-key".to_string()))]
+    #[case("", Some("server-key".to_string()))]
+    #[case("   ", Some("server-key".to_string()))]
+    fn resolve_api_key_file_normalization(
+        #[case] file_key: &str,
+        #[case] expected: Option<String>,
+    ) {
+        let (_t, _g) = with_xdg_config(Some("[auth]\napi_key = \"server-key\"\n"));
+        let mut config = local_config();
+        config.server.api_key = Some(file_key.to_string());
+        let result = resolve_api_key(None, &config);
+        // Valid file key wins; empty/whitespace falls through to server config
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn resolve_api_key_server_config_fallback() {
+        let (_t, _g) = with_xdg_config(Some("[auth]\napi_key = \"  server-key  \"\n"));
+        let result = resolve_api_key(None, &local_config());
+        assert_eq!(result, Some("server-key".to_string()));
+    }
+
+    #[rstest]
+    fn resolve_api_key_skips_server_config_for_remote_host() {
+        let (_t, _g) = with_xdg_config(Some("[auth]\napi_key = \"server-key\"\n"));
+        let mut config = local_config();
+        config.server.host = "example.com".to_string();
+        let result = resolve_api_key(None, &config);
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    #[case("# no auth section\n", None)]
+    #[case("not = valid = toml\n", None)]
+    fn resolve_api_key_server_config_errors(
+        #[case] contents: &str,
+        #[case] expected: Option<String>,
+    ) {
+        let (_t, _g) = with_xdg_config(Some(contents));
+        let result = resolve_api_key(None, &local_config());
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn resolve_api_key_no_sources_returns_none() {
+        let (_t, _g) = with_xdg_config(None);
+        let result = resolve_api_key(None, &local_config());
+        assert_eq!(result, None);
+    }
+
+    #[rstest]
+    fn resolve_api_key_empty_server_key_returns_none() {
+        let (_t, _g) = with_xdg_config(Some("[auth]\napi_key = \"\"\n"));
+        let result = resolve_api_key(None, &local_config());
+        assert_eq!(result, None);
+    }
 }
