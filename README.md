@@ -91,9 +91,16 @@ replace-title = "Unknown"
 - `server.port` and `server.host` address the ActivityWatch server instance.
 - `awatcher.idle-timeout-seconds` is the time of inactivity when it is considered "idle".
 - `awatcher.poll-time-idle-seconds` and `awatcher.poll-time-window-seconds` are intervals between collecting and sending statistics.
-- `api-key` can be overridden by environment variable `AW_API_KEY`.
 
 All options of `server` and `awatcher` config file's sections can be overridden with command-line arguments, as well as the config path. See the builtin help in the command for details.
+
+### API Key
+
+ActivityWatch server can require an authentication by API key which is resolved using the following priority order:
+
+1.  `--api-key` or environment variable `AW_API_KEY`
+2. **awatcher config** — `[server].api-key` in `~/.config/awatcher/config.toml`
+3. **aw-server-rust config** — `[auth].api_key` in `~/.config/activitywatch/aw-server-rust/config.toml` (only when the server host is recognized as local)
 
 ### Filters
 

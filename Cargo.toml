@@ -11,14 +11,14 @@ repository = "https://github.com/2e3s/awatcher"
 name = "awatcher"
 path = "src/main.rs"
 
+[workspace.package]
+version = "0.4.0"
+
 [build-dependencies]
 image = { version = "0.25.6" }
 
 [workspace]
 members = ["watchers"]
-
-[workspace.package]
-version = "0.3.3"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
